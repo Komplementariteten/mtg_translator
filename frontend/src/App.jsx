@@ -266,7 +266,7 @@ function App() {
             ))}
           </ul>
         )}
-        <p className="muted">Suggestions appear after 3 characters, in the source language. Use an exact name, including an individual card face.</p>
+        <p className="muted">Suggestions appear after 3 characters and match the start of any word (ae, oe, ue also match ä, ö, ü). Use an exact name, including an individual card face.</p>
         <button disabled={loading || !language || !name.trim()}>
           {loading ? 'Searching…' : 'Show English card'}
         </button>

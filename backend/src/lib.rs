@@ -160,8 +160,46 @@ impl Suggestion {
 const MIN_SUGGEST_CHARS: usize = 3;
 const MAX_SUGGESTIONS: usize = 10;
 
+/// Lower-cases and folds umlauts (ä = ae, ö = oe, ü = ue, ß = ss) and other accents,
+/// so that "Blitzschlag", "bluetenzauber" and "Blütenzauber" are all matchable.
 fn normalize(name: &str) -> String {
-    name.trim().to_lowercase()
+    let mut folded = String::with_capacity(name.len());
+    for c in name.trim().chars().flat_map(char::to_lowercase) {
+        match c {
+            'ä' => folded.push_str("ae"),
+            'ö' => folded.push_str("oe"),
+            'ü' => folded.push_str("ue"),
+            'ß' => folded.push_str("ss"),
+            'æ' => folded.push_str("ae"),
+            'œ' => folded.push_str("oe"),
+            'à' | 'á' | 'â' | 'ã' | 'å' | 'ā' => folded.push('a'),
+            'ç' => folded.push('c'),
+            'è' | 'é' | 'ê' | 'ë' | 'ē' => folded.push('e'),
+            'ì' | 'í' | 'î' | 'ï' | 'ī' => folded.push('i'),
+            'ñ' => folded.push('n'),
+            'ò' | 'ó' | 'ô' | 'õ' | 'ø' | 'ō' => folded.push('o'),
+            'ù' | 'ú' | 'û' | 'ū' => folded.push('u'),
+            'ý' | 'ÿ' => folded.push('y'),
+            _ => folded.push(c),
+        }
+    }
+    folded
+}
+
+/// 0 when `normalized` starts with `query`, 1 when `query` starts at a later word boundary.
+fn match_rank(normalized: &str, query: &str) -> Option<u8> {
+    if normalized.starts_with(query) {
+        return Some(0);
+    }
+    normalized
+        .match_indices(query)
+        .any(|(index, _)| {
+            normalized[..index]
+                .chars()
+                .next_back()
+                .is_some_and(|before| !before.is_alphanumeric())
+        })
+        .then_some(1)
 }
 
 impl Database {
@@ -246,45 +284,64 @@ impl Database {
         jobs
     }
 
-    /// Names in `lang` that start with `prefix`; every suggestion is accepted by `translate`.
-    fn suggest(&self, prefix: &str, lang: &str) -> Vec<Suggestion> {
-        let prefix = normalize(prefix);
-        if prefix.chars().count() < MIN_SUGGEST_CHARS {
+    /// Names in `lang` in which a word starts with `query` (prefix matches first);
+    /// every suggestion is accepted by `translate`.
+    fn suggest(&self, query: &str, lang: &str) -> Vec<Suggestion> {
+        let query = normalize(query);
+        if query.chars().count() < MIN_SUGGEST_CHARS {
             return Vec::new();
         }
         let mut suggestions = BTreeMap::new();
         for (_, oracle_ids) in self
             .names
-            .range(prefix.clone()..)
-            .take_while(|(key, _)| key.starts_with(&prefix))
+            .range(query.clone()..)
+            .take_while(|(key, _)| key.starts_with(&query))
         {
-            for id in oracle_ids {
-                let Some(card) = self.cards.get(id).and_then(|c| c.get(lang)) else {
-                    continue;
-                };
-                let whole = (
-                    card.printed_name.as_deref().unwrap_or(&card.name),
-                    card.card_faces.first(),
-                );
-                let faces = card.card_faces.iter().map(|face| {
-                    (
-                        face.printed_name.as_deref().unwrap_or(&face.name),
-                        Some(face),
-                    )
-                });
-                for (name, face) in std::iter::once(whole).chain(faces) {
-                    if normalize(name).starts_with(&prefix) {
-                        suggestions
-                            .entry(name.to_string())
-                            .or_insert_with(|| Suggestion::new(name, card, face));
-                    }
-                }
-            }
+            self.collect_suggestions(oracle_ids, lang, &query, &mut suggestions);
             if suggestions.len() >= MAX_SUGGESTIONS * 4 {
                 break;
             }
         }
+        // Word-start matches inside names need a scan over all keys.
+        if suggestions.len() < MAX_SUGGESTIONS {
+            for (key, oracle_ids) in &self.names {
+                if match_rank(key, &query) == Some(1) {
+                    self.collect_suggestions(oracle_ids, lang, &query, &mut suggestions);
+                }
+            }
+        }
         suggestions.into_values().take(MAX_SUGGESTIONS).collect()
+    }
+
+    fn collect_suggestions(
+        &self,
+        oracle_ids: &BTreeSet<String>,
+        lang: &str,
+        query: &str,
+        suggestions: &mut BTreeMap<(u8, String), Suggestion>,
+    ) {
+        for id in oracle_ids {
+            let Some(card) = self.cards.get(id).and_then(|c| c.get(lang)) else {
+                continue;
+            };
+            let whole = (
+                card.printed_name.as_deref().unwrap_or(&card.name),
+                card.card_faces.first(),
+            );
+            let faces = card.card_faces.iter().map(|face| {
+                (
+                    face.printed_name.as_deref().unwrap_or(&face.name),
+                    Some(face),
+                )
+            });
+            for (name, face) in std::iter::once(whole).chain(faces) {
+                if let Some(rank) = match_rank(&normalize(name), query) {
+                    suggestions
+                        .entry((rank, name.to_string()))
+                        .or_insert_with(|| Suggestion::new(name, card, face));
+                }
+            }
+        }
     }
 
     pub fn stats(&self) -> Stats {
@@ -500,6 +557,27 @@ mod tests {
         assert_eq!(names("Lightn", "en"), ["Lightning Bolt"]);
         assert_eq!(names("Insek", "de"), ["Insekten-Scheusal"]);
         assert!(names("zzz", "de").is_empty());
+    }
+
+    #[test]
+    fn folds_umlauts_and_matches_at_word_boundaries() {
+        assert_eq!(
+            normalize(" Blütenzauber STRAßE Ærie "),
+            "bluetenzauber strasse aerie"
+        );
+        let names = |q: &str, lang: &str| {
+            database()
+                .suggest(q, lang)
+                .into_iter()
+                .map(|s| s.name)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(names("geheimnisstoeb", "de"), ["Geheimnisstöberer"]);
+        assert_eq!(names("geheimnisstöb", "de"), ["Geheimnisstöberer"]);
+        assert_eq!(names("scheus", "de"), ["Insekten-Scheusal"]);
+        assert_eq!(names("bolt", "en"), ["Lightning Bolt"]);
+        assert!(names("ightning", "en").is_empty());
+        assert_eq!(names("lightning b", "en"), ["Lightning Bolt"]);
     }
 
     #[test]
