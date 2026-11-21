@@ -9,7 +9,7 @@ The application makes no calls to Scryfall or translation services at runtime.
 Download and extract the **All Cards** JSON export from
 [Scryfall bulk data](https://scryfall.com/docs/api/bulk-data). Unlike Oracle Cards
 or Default Cards, All Cards includes language variants. Save the JSON array
-locally, for example in `data/all-cards.json` (ignored by Git). The export can
+locally, for example in `data/all-cards-20261121102255.jsonl.gz` (ignored by Git). The export can
 be large: allow time for startup and sufficient memory for the lookup index.
 A smaller subset of the same JSON format also works.
 
@@ -30,7 +30,7 @@ Install a current stable Rust toolchain and Node.js 22.12+ (or 24+) with npm.
 From the repository root, start the backend:
 
 ```sh
-CARD_DATABASE="$PWD/data/all-cards.json" cargo run --manifest-path backend/Cargo.toml
+CARD_DATABASE="$PWD/data/all-cards-20261121102255.jsonl.gz" cargo run --manifest-path backend/Cargo.toml
 ```
 
 In another terminal:
@@ -44,7 +44,7 @@ npm run dev
 Open the URL printed by Vite (normally `http://localhost:5173`). Its `/api`
 proxy connects to the backend on `127.0.0.1:3001`.
 For a quick offline demonstration without downloading bulk data, set
-`CARD_DATABASE="$PWD/backend/tests/cards.json"` instead. This small synthetic
+`CARD_DATABASE="$PWD/backend/tests/cards.jsonl"` instead. This small synthetic
 fixture includes `Lightning Bolt` / `Blitzschlag` and a double-faced card;
 its example rules text is not real card rules.
 
@@ -54,18 +54,35 @@ its example rules text is not real card rules.
 npm --prefix frontend ci
 npm --prefix frontend run build
 cargo build --release --manifest-path backend/Cargo.toml
-CARD_DATABASE="$PWD/data/all-cards.json" ./backend/target/release/backend
+CARD_DATABASE="$PWD/data/all-cards-20261121102255.jsonl.gz" ./backend/target/release/backend
 ```
 
-Open `http://127.0.0.1:3001`. The backend serves `frontend/dist` as well as the API.
+Open `http://127.0.0.1:3001`. Release builds embed `frontend/dist` into the binary, so build the
+frontend first; the backend then serves the UI and the API without Node.js. Debug builds read
+`frontend/dist` from disk.
 
 Configuration:
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `CARD_DATABASE` | Required | Path to a local Scryfall JSON array |
+| `CARD_DATABASE` | Required | Path to a local Scryfall JSONL file (`.jsonl`, or gzip-compressed `.jsonl.gz`) |
 | `BIND_ADDRESS` | `127.0.0.1:3001` | Backend listen address |
-| `FRONTEND_DIST` | `frontend/dist` relative to the backend source directory | Static frontend directory |
+| `IMAGE_CACHE` | `data/images` | Directory for the half-resolution card image cache, served at `/images` |
+
+## Docker
+
+The multi-stage `Dockerfile` builds the frontend and a static backend with the embedded UI into a
+`scratch` image (about 14 MB). Mount a directory containing the Scryfall export as
+`/data/cards.jsonl.gz`; the image cache is stored in `/data/images`.
+
+```sh
+docker build -t mtg-translator .
+docker run --rm -p 3001:3001 -v "$PWD/data:/data" mtg-translator
+# or: docker compose up --build   (expects data/cards.jsonl.gz)
+```
+
+The container listens on `0.0.0.0:3001` (`BIND_ADDRESS`); override `CARD_DATABASE` to use another
+file name inside `/data`.
 
 The default binding is local-only. If exposing the server publicly, put it behind
 an appropriately secured reverse proxy. No credentials are needed.

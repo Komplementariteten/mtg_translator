@@ -1,0 +1,9 @@
+{"id": "bolt-en", "oracle_id": "bolt", "name": "Lightning Bolt", "lang": "en", "colors": ["R"], "image_uris": {"normal": "https://example.invalid/bolt.jpg?1"}, "mana_cost": "{R}", "type_line": "Instant", "oracle_text": "Example rules text", "set_name": "Example set", "collector_number": "1", "released_at": "2020-01-01"}
+{"id": "bolt-de-new", "oracle_id": "bolt", "name": "Lightning Bolt", "lang": "de", "printed_name": "Blitzschlag", "printed_text": "Beispieltext", "printed_type_line": "Spontanzauber", "mana_cost": "{R}", "type_line": "Instant", "set_name": "Example set", "collector_number": "1", "released_at": "2021-01-01"}
+{"id": "bolt-de-old", "oracle_id": "bolt", "name": "Lightning Bolt", "lang": "de", "printed_name": "Blitzschlag", "released_at": "2020-01-01"}
+{"id": "delver-en", "oracle_id": "delver", "name": "Delver of Secrets // Insectile Aberration", "lang": "en", "card_faces": [{"name": "Delver of Secrets", "mana_cost": "{U}", "type_line": "Creature", "colors": ["U"]}, {"name": "Insectile Aberration", "type_line": "Creature"}]}
+{"id": "delver-de", "oracle_id": "delver", "name": "Delver of Secrets // Insectile Aberration", "lang": "de", "card_faces": [{"name": "Delver of Secrets", "printed_name": "Geheimnisstöberer", "mana_cost": "{U}", "printed_type_line": "Kreatur"}, {"name": "Insectile Aberration", "printed_name": "Insekten-Scheusal", "printed_type_line": "Kreatur"}]}
+{"id": "only-en", "oracle_id": "only", "name": "Only English", "lang": "en"}
+{"id": "token", "name": "Unlinked Token", "lang": "xx"}
+{"id": "gold-en", "oracle_id": "gold", "name": "Gold Card", "lang": "en", "mana_cost": "{W}{B}", "type_line": "Creature", "colors": ["W", "B"]}
+{"id": "forest-en", "oracle_id": "forest", "name": "Test Forest", "lang": "en", "type_line": "Basic Land — Forest", "colors": []}

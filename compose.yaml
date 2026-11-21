@@ -1,0 +1,9 @@
+services:
+  mtg-translator:
+    build: .
+    image: mtg-translator
+    ports:
+      - "3001:3001"
+    volumes:
+      # Put the Scryfall export at ./data/cards.jsonl.gz; the image cache is stored in ./data/images.
+      - ./data:/data

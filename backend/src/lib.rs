@@ -1,6 +1,5 @@
 use std::{
-    collections::{BTreeSet, HashMap},
-    fmt,
+    collections::{BTreeMap, BTreeSet, HashMap},
     io::Read,
     sync::Arc,
 };
@@ -11,13 +10,20 @@ use axum::{
     http::StatusCode,
     routing::get,
 };
-use serde::{
-    Deserialize, Serialize,
-    de::{SeqAccess, Visitor},
-};
+pub mod frontend;
+pub mod images;
+
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct ImageUris {
+    pub normal: Option<String>,
+}
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct CardFace {
+    pub image_uris: Option<ImageUris>,
+    pub colors: Option<Vec<String>>,
     pub name: String,
     pub printed_name: Option<String>,
     pub mana_cost: Option<String>,
@@ -29,6 +35,10 @@ pub struct CardFace {
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct Card {
+    #[serde(default)]
+    pub keywords: Vec<String>,
+    pub image_uris: Option<ImageUris>,
+    pub colors: Option<Vec<String>>,
     pub id: String,
     pub oracle_id: Option<String>,
     pub name: String,
@@ -48,44 +58,80 @@ pub struct Card {
 
 #[derive(Default)]
 pub struct Database {
-    names: HashMap<String, BTreeSet<String>>,
+    names: BTreeMap<String, BTreeSet<String>>,
     cards: HashMap<String, HashMap<String, Card>>,
     languages: BTreeSet<String>,
 }
+
+/// Name suggestion with the colour category used to tint it in the UI.
+#[derive(Debug, Serialize)]
+pub struct Suggestion {
+    pub name: String,
+    pub mana_cost: Option<String>,
+    /// One of W, U, B, R, G, multicolor, colorless or land.
+    pub color: &'static str,
+}
+
+impl Suggestion {
+    fn new(name: &str, card: &Card, face: Option<&CardFace>) -> Self {
+        let type_line = face
+            .and_then(|f| f.type_line.as_deref())
+            .or(card.type_line.as_deref())
+            .unwrap_or_default();
+        let colors = face
+            .and_then(|f| f.colors.as_deref())
+            .or(card.colors.as_deref())
+            .unwrap_or_default();
+        let color = match colors {
+            _ if type_line
+                .split(" // ")
+                .next()
+                .is_some_and(|t| t.contains("Land")) =>
+            {
+                "land"
+            }
+            [] => "colorless",
+            [single] => match single.as_str() {
+                "W" => "W",
+                "U" => "U",
+                "B" => "B",
+                "R" => "R",
+                "G" => "G",
+                _ => "colorless",
+            },
+            _ => "multicolor",
+        };
+        let mana_cost = face
+            .and_then(|f| f.mana_cost.clone())
+            .or_else(|| card.mana_cost.clone())
+            .filter(|cost| !cost.is_empty());
+        Self {
+            name: name.to_string(),
+            mana_cost,
+            color,
+        }
+    }
+}
+
+const MIN_SUGGEST_CHARS: usize = 3;
+const MAX_SUGGESTIONS: usize = 10;
 
 fn normalize(name: &str) -> String {
     name.trim().to_lowercase()
 }
 
 impl Database {
+    /// Reads Scryfall bulk data in JSON Lines format: one card object per line.
     pub fn from_reader(reader: impl Read) -> Result<Self, serde_json::Error> {
-        struct DatabaseVisitor;
-
-        impl<'de> Visitor<'de> for DatabaseVisitor {
-            type Value = Database;
-
-            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-                formatter.write_str("a Scryfall bulk-data array")
-            }
-
-            fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Database, A::Error> {
-                let mut database = Database::default();
-                while let Some(card) = seq.next_element::<Card>()? {
-                    database.insert(card);
-                }
-                if database.cards.is_empty() {
-                    return Err(serde::de::Error::custom(
-                        "database contains no cards with an oracle_id",
-                    ));
-                }
-                Ok(database)
-            }
+        let mut database = Database::default();
+        for card in serde_json::Deserializer::from_reader(reader).into_iter::<Card>() {
+            database.insert(card?);
         }
-
-        let mut deserializer = serde_json::Deserializer::from_reader(reader);
-        let database =
-            serde::de::Deserializer::deserialize_seq(&mut deserializer, DatabaseVisitor)?;
-        deserializer.end()?;
+        if database.cards.is_empty() {
+            return Err(serde::de::Error::custom(
+                "database contains no cards with an oracle_id",
+            ));
+        }
         Ok(database)
     }
 
@@ -113,6 +159,76 @@ impl Database {
         if replace {
             translations.insert(card.lang.clone(), card);
         }
+    }
+
+    /// Normal-size image URLs of the newest English printing of every Oracle card.
+    pub fn image_jobs(&self) -> Vec<images::ImageJob> {
+        let mut jobs = Vec::new();
+        for (oracle_id, translations) in &self.cards {
+            let Some(card) = translations.get("en") else {
+                continue;
+            };
+            let urls: Vec<_> = if card.card_faces.iter().any(|f| f.image_uris.is_some()) {
+                card.card_faces
+                    .iter()
+                    .map(|f| f.image_uris.as_ref())
+                    .collect()
+            } else {
+                vec![card.image_uris.as_ref()]
+            };
+            for (index, uris) in urls.into_iter().enumerate() {
+                if let Some(url) = uris.and_then(|u| u.normal.clone()) {
+                    jobs.push(images::ImageJob {
+                        oracle_id: oracle_id.clone(),
+                        index,
+                        url,
+                    });
+                }
+            }
+        }
+        jobs.sort_by(|a, b| (&a.oracle_id, a.index).cmp(&(&b.oracle_id, b.index)));
+        jobs
+    }
+
+    /// Names in `lang` that start with `prefix`; every suggestion is accepted by `translate`.
+    fn suggest(&self, prefix: &str, lang: &str) -> Vec<Suggestion> {
+        let prefix = normalize(prefix);
+        if prefix.chars().count() < MIN_SUGGEST_CHARS {
+            return Vec::new();
+        }
+        let mut suggestions = BTreeMap::new();
+        for (_, oracle_ids) in self
+            .names
+            .range(prefix.clone()..)
+            .take_while(|(key, _)| key.starts_with(&prefix))
+        {
+            for id in oracle_ids {
+                let Some(card) = self.cards.get(id).and_then(|c| c.get(lang)) else {
+                    continue;
+                };
+                let whole = (
+                    card.printed_name.as_deref().unwrap_or(&card.name),
+                    card.card_faces.first(),
+                );
+                let faces = card.card_faces.iter().map(|face| {
+                    (
+                        face.printed_name.as_deref().unwrap_or(&face.name),
+                        Some(face),
+                    )
+                });
+                for (name, face) in std::iter::once(whole).chain(faces) {
+                    if normalize(name).starts_with(&prefix) {
+                        suggestions
+                            .entry(name.to_string())
+                            .or_insert_with(|| Suggestion::new(name, card, face));
+                    }
+                }
+            }
+            if suggestions.len() >= MAX_SUGGESTIONS * 4 {
+                break;
+            }
+        }
+        suggestions.into_values().take(MAX_SUGGESTIONS).collect()
     }
 
     fn translate(&self, name: &str, lang: &str) -> Result<Vec<&Card>, ApiError> {
@@ -174,6 +290,19 @@ async fn languages(State(database): State<Arc<Database>>) -> Json<Vec<String>> {
     Json(database.languages.iter().cloned().collect())
 }
 
+#[derive(Deserialize)]
+pub struct SuggestQuery {
+    pub q: String,
+    pub lang: String,
+}
+
+async fn suggest(
+    State(database): State<Arc<Database>>,
+    Query(query): Query<SuggestQuery>,
+) -> Json<Vec<Suggestion>> {
+    Json(database.suggest(&query.q, &query.lang))
+}
+
 async fn translate(
     State(database): State<Arc<Database>>,
     Query(query): Query<TranslationQuery>,
@@ -190,6 +319,7 @@ async fn translate(
 pub fn api(database: Database) -> Router {
     Router::new()
         .route("/api/languages", get(languages))
+        .route("/api/suggest", get(suggest))
         .route("/api/translate", get(translate))
         .with_state(Arc::new(database))
 }
@@ -199,7 +329,7 @@ mod tests {
     use super::*;
 
     fn database() -> Database {
-        Database::from_reader(include_bytes!("../tests/cards.json").as_slice()).unwrap()
+        Database::from_reader(include_bytes!("../tests/cards.jsonl").as_slice()).unwrap()
     }
 
     #[test]
@@ -253,8 +383,36 @@ mod tests {
     }
 
     #[test]
+    fn suggests_names_in_the_requested_language() {
+        let names = |q: &str, lang: &str| {
+            database()
+                .suggest(q, lang)
+                .into_iter()
+                .map(|s| s.name)
+                .collect::<Vec<_>>()
+        };
+        assert!(names("Bl", "de").is_empty());
+        assert_eq!(names("blitz", "de"), ["Blitzschlag"]);
+        assert!(names("blitz", "en").is_empty());
+        assert_eq!(names("Lightn", "en"), ["Lightning Bolt"]);
+        assert_eq!(names("Insek", "de"), ["Insekten-Scheusal"]);
+        assert!(names("zzz", "de").is_empty());
+    }
+
+    #[test]
+    fn suggestions_carry_color_category_and_mana_cost() {
+        let db = database();
+        let bolt = &db.suggest("lightn", "en")[0];
+        assert_eq!((bolt.color, bolt.mana_cost.as_deref()), ("R", Some("{R}")));
+        assert_eq!(db.suggest("delver", "en")[0].color, "U");
+        assert_eq!(db.suggest("Only", "en")[0].color, "colorless");
+        assert_eq!(db.suggest("Gold", "en")[0].color, "multicolor");
+        assert_eq!(db.suggest("Test Fo", "en")[0].color, "land");
+    }
+
+    #[test]
     fn validates_database_and_skips_cards_without_oracle_ids() {
-        for invalid in ["[]", "{}", "[", "[] trailing"] {
+        for invalid in ["", "[]", "{", "{\"id\": \"x\"}"] {
             assert!(Database::from_reader(invalid.as_bytes()).is_err());
         }
         let db = database();
