@@ -10,8 +10,11 @@ use axum::{
     http::StatusCode,
     routing::get,
 };
+pub mod crawlers;
 pub mod frontend;
 pub mod images;
+pub mod limiter;
+pub mod logging;
 
 use serde::{Deserialize, Serialize};
 
@@ -49,6 +52,8 @@ pub struct Card {
     pub printed_type_line: Option<String>,
     pub oracle_text: Option<String>,
     pub printed_text: Option<String>,
+    pub set: Option<String>,
+    pub rarity: Option<String>,
     pub set_name: Option<String>,
     pub collector_number: Option<String>,
     pub released_at: Option<String>,
@@ -56,11 +61,50 @@ pub struct Card {
     pub card_faces: Vec<CardFace>,
 }
 
+/// One printing (any language) of an Oracle card.
+#[derive(Debug, Serialize)]
+pub struct Printing {
+    pub id: String,
+    pub lang: String,
+    pub set: Option<String>,
+    pub set_name: Option<String>,
+    pub collector_number: Option<String>,
+    pub released_at: Option<String>,
+    pub rarity: Option<String>,
+}
+
+impl Printing {
+    fn new(card: &Card) -> Self {
+        Self {
+            id: card.id.clone(),
+            lang: card.lang.clone(),
+            set: card.set.clone(),
+            set_name: card.set_name.clone(),
+            collector_number: card.collector_number.clone(),
+            released_at: card.released_at.clone(),
+            rarity: card.rarity.clone(),
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct Database {
+    skipped: usize,
+    printings: HashMap<String, Vec<Printing>>,
     names: BTreeMap<String, BTreeSet<String>>,
     cards: HashMap<String, HashMap<String, Card>>,
     languages: BTreeSet<String>,
+}
+
+/// Summary of the loaded database, used for start-up diagnostics.
+#[derive(Debug)]
+pub struct Stats {
+    pub oracle_cards: usize,
+    pub printings: usize,
+    pub name_keys: usize,
+    pub languages: Vec<String>,
+    pub skipped_without_oracle_id: usize,
+    pub oracle_cards_without_english: usize,
 }
 
 /// Name suggestion with the colour category used to tint it in the UI.
@@ -137,6 +181,7 @@ impl Database {
 
     fn insert(&mut self, card: Card) {
         let Some(oracle_id) = &card.oracle_id else {
+            self.skipped += 1;
             return;
         };
         let names = std::iter::once(card.name.as_str())
@@ -151,17 +196,28 @@ impl Database {
                 .insert(oracle_id.clone());
         }
         self.languages.insert(card.lang.clone());
+        self.printings
+            .entry(oracle_id.clone())
+            .or_default()
+            .push(Printing::new(&card));
         let translations = self.cards.entry(oracle_id.clone()).or_default();
-        // Keep the newest printing, with a stable tie-breaker for bulk-file ordering.
-        let replace = translations.get(&card.lang).is_none_or(|existing| {
-            (&card.released_at, &card.id) > (&existing.released_at, &existing.id)
-        });
+        // Keep the oldest printing (undated ones last), with a stable tie-breaker for bulk-file ordering.
+        let age = |card: &Card| {
+            (
+                card.released_at.is_none(),
+                card.released_at.clone(),
+                card.id.clone(),
+            )
+        };
+        let replace = translations
+            .get(&card.lang)
+            .is_none_or(|existing| age(&card) < age(existing));
         if replace {
             translations.insert(card.lang.clone(), card);
         }
     }
 
-    /// Normal-size image URLs of the newest English printing of every Oracle card.
+    /// Normal-size image URLs of the oldest English printing of every Oracle card.
     pub fn image_jobs(&self) -> Vec<images::ImageJob> {
         let mut jobs = Vec::new();
         for (oracle_id, translations) in &self.cards {
@@ -229,6 +285,42 @@ impl Database {
             }
         }
         suggestions.into_values().take(MAX_SUGGESTIONS).collect()
+    }
+
+    pub fn stats(&self) -> Stats {
+        Stats {
+            oracle_cards: self.cards.len(),
+            printings: self.printings.values().map(Vec::len).sum(),
+            name_keys: self.names.len(),
+            languages: self.languages.iter().cloned().collect(),
+            skipped_without_oracle_id: self.skipped,
+            oracle_cards_without_english: self
+                .cards
+                .values()
+                .filter(|translations| !translations.contains_key("en"))
+                .count(),
+        }
+    }
+
+    /// All printings of an Oracle card, oldest first.
+    fn printings(&self, oracle_id: &str) -> Vec<&Printing> {
+        let mut printings: Vec<_> = self
+            .printings
+            .get(oracle_id)
+            .into_iter()
+            .flatten()
+            .collect();
+        let key = |p: &Printing| {
+            (
+                p.released_at.is_none(),
+                p.released_at.clone(),
+                p.set.clone(),
+                p.collector_number.clone(),
+                p.lang.clone(),
+            )
+        };
+        printings.sort_by_key(|p| key(p));
+        printings
     }
 
     fn translate(&self, name: &str, lang: &str) -> Result<Vec<&Card>, ApiError> {
@@ -308,12 +400,23 @@ async fn translate(
     Query(query): Query<TranslationQuery>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let cards = database.translate(&query.name, &query.lang)?;
-    serde_json::to_value(cards).map(Json).map_err(|_| {
+    let serialize = |_| {
         api_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "Could not serialize cards.",
         )
-    })
+    };
+    let mut values = Vec::with_capacity(cards.len());
+    for card in cards {
+        let mut value = serde_json::to_value(card).map_err(serialize)?;
+        if let (Some(object), Some(oracle_id)) = (value.as_object_mut(), &card.oracle_id) {
+            let printings =
+                serde_json::to_value(database.printings(oracle_id)).map_err(serialize)?;
+            object.insert("printings".into(), printings);
+        }
+        values.push(value);
+    }
+    Ok(Json(values.into()))
 }
 
 pub fn api(database: Database) -> Router {
@@ -339,7 +442,7 @@ mod tests {
             let cards = db.translate(name, "de").ok().unwrap();
             assert_eq!(cards.len(), 1);
             assert_eq!(cards[0].printed_name.as_deref(), Some("Blitzschlag"));
-            assert_eq!(cards[0].id, "bolt-de-new");
+            assert_eq!(cards[0].id, "bolt-de-old");
             assert_eq!(cards[0].printed_text.as_deref(), Some("Beispieltext"));
         }
         assert_eq!(
@@ -438,5 +541,11 @@ mod tests {
         .ok()
         .unwrap();
         assert_eq!(response.0[0]["printed_name"], "Blitzschlag");
+        let printings = response.0[0]["printings"].as_array().unwrap();
+        let ids: Vec<_> = printings
+            .iter()
+            .map(|p| p["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, ["bolt-de-old", "bolt-en", "bolt-de-new"]);
     }
 }

@@ -19,7 +19,7 @@ FROM scratch
 COPY --from=backend /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY --from=backend /app/backend/target/release/backend /backend
 ENV BIND_ADDRESS=0.0.0.0:3001 \
-    CARD_DATABASE=/data/cards.jsonl.gz \
+    CARD_DATABASE=/data \
     IMAGE_CACHE=/data/images \
     SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
 VOLUME /data

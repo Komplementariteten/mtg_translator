@@ -5,5 +5,5 @@ services:
     ports:
       - "3001:3001"
     volumes:
-      # Put the Scryfall export at ./data/cards.jsonl.gz; the image cache is stored in ./data/images.
+      # Put the Scryfall export (*.jsonl.gz) into ./data; the image cache is stored in ./data/images.
       - ./data:/data

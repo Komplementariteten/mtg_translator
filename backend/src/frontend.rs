@@ -35,3 +35,8 @@ pub async fn serve(uri: Uri) -> Response {
         None => (StatusCode::NOT_FOUND, "Frontend has not been built.").into_response(),
     }
 }
+
+/// Number of embedded frontend files and whether `index.html` is among them.
+pub fn embedded() -> (usize, bool) {
+    (Assets::iter().count(), Assets::get("index.html").is_some())
+}

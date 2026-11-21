@@ -83,6 +83,7 @@ pub fn sync(database: &Database, dir: &Path) -> std::io::Result<usize> {
         .map_err(std::io::Error::other)?;
     let next = AtomicUsize::new(0);
     let stored = AtomicUsize::new(0);
+    let failed = AtomicUsize::new(0);
     let console = Mutex::new(());
     thread::scope(|scope| {
         for _ in 0..WORKERS {
@@ -96,11 +97,18 @@ pub fn sync(database: &Database, dir: &Path) -> std::io::Result<usize> {
                             stored.fetch_add(1, Ordering::Relaxed);
                             println!("Saved image {}", job.url);
                         }
-                        Err(error) => eprintln!("Failed image {}: {error}", job.url),
+                        Err(error) => {
+                            failed.fetch_add(1, Ordering::Relaxed);
+                            eprintln!("Failed image {}: {error}", job.url);
+                        }
                     }
                 }
             });
         }
     });
+    let failed = failed.into_inner();
+    if failed > 0 {
+        eprintln!("[warn] {failed} image(s) failed and will be retried on the next start");
+    }
     Ok(stored.into_inner())
 }

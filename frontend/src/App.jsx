@@ -64,6 +64,27 @@ function CardImage({ card, index }) {
   )
 }
 
+function Printings({ printings }) {
+  if (!printings?.length) return null
+  return (
+    <details className="printings">
+      <summary>All printings, oldest first ({printings.length})</summary>
+      <ul>
+        {printings.map((printing) => (
+          <li key={printing.id}>
+            <strong>{printing.set_name || 'Unknown set'}</strong>
+            {printing.set && <span className="muted"> ({printing.set.toUpperCase()})</span>}
+            {printing.collector_number && <span> #{printing.collector_number}</span>}
+            <span className="muted">
+              {' · '}{printing.lang}{printing.released_at && ` · ${printing.released_at}`}{printing.rarity && ` · ${printing.rarity}`}
+            </span>
+          </li>
+        ))}
+      </ul>
+    </details>
+  )
+}
+
 function CardDetails({ card, keywords, image }) {
   const hints = keywordHints(card.oracle_text, keywords)
   return (
@@ -211,6 +232,9 @@ function App() {
               maxLength={300}
               disabled={loading}
               autoComplete="off"
+              autoCapitalize="off"
+              spellCheck={false}
+              enterKeyHint="search"
               ref={inputRef}
               onKeyDown={handleKeyDown}
               role="combobox"
@@ -266,6 +290,7 @@ function App() {
                 />
               ))
             })()}
+            <Printings printings={card.printings} />
           </article>
         ))}
       </section>

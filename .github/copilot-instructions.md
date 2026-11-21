@@ -18,7 +18,7 @@ Production: build the frontend, then the release backend; the backend serves `fr
 ## Architecture
 
 - `backend/src/lib.rs` holds everything except startup: the `Database` (streamed from the JSON array via a serde `visit_seq`, so the huge file is never fully materialised), the lookup index, the handlers and the unit tests. `main.rs` only reads env vars, loads the database and serves `api()` plus the static frontend.
-- Indexing: printings are joined by `oracle_id` (cards without one are skipped). English and localized names, including individual card-face names, are indexed under a normalized key (case-insensitive, trimmed). Per language, only the newest printing is kept (ID tie-breaker).
+- Indexing: printings are joined by `oracle_id` (cards without one are skipped). English and localized names, including individual card-face names, are indexed under a normalized key (case-insensitive, trimmed). Per language, only the oldest printing is kept (ID tie-breaker).
 - API: `GET /api/languages` and `GET /api/translate?name=&lang=`. Errors are JSON `{ "error": ... }`: 400 for invalid input, 404 for an unknown card or a missing language printing. A name can match several Oracle cards, so translate returns an array.
 - Missing localized rules text falls back to English Oracle text, which the frontend labels as such. Multi-faced cards are displayed face by face (`card_faces`).
 - Frontend is a single-component app (`frontend/src/App.jsx`) with plain CSS.

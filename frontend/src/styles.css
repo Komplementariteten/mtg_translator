@@ -63,3 +63,15 @@ footer { margin-top: 32px; }
 .search-row label { margin-top: 0; }
 
 .suggestions button[aria-selected='true'] { outline: 2px solid #14161a; outline-offset: -2px; }
+
+@media (max-width: 520px) {
+  main { padding: 20px 12px; }
+  form, .card { padding: 16px; }
+  .search-row .field-language { flex-basis: 6.5rem; }
+  .card-face { justify-content: center; }
+  .face-text { flex-basis: 100%; }
+}
+
+.printings { margin-top: 20px; border-top: 1px solid #cfcabd; padding-top: 12px; }
+.printings summary { cursor: pointer; font-weight: 600; }
+.printings ul { margin: 8px 0 0; padding-left: 20px; max-height: 24rem; overflow-y: auto; }
